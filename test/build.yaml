@@ -5,7 +5,7 @@
 build_basedir: .build/
 
 # git_basedir (optional)
-# directory where git repos will reside (subdirs created for each target)
+# directory where git repos will reside (separate repos created for each target)
 # commits made after every build and deploy (and labled accordingly)
 git_basedir: .repo/
 
