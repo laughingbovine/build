@@ -11,18 +11,18 @@ build_basedir: .build/
 # commits made after every build and deploy (and labled accordingly)
 git_basedir: .repo/
 
-# files
+# files (optional)
 # list of files to be built/deployed
 files:
   - 'afile'
 
-# filters
+# filters (optional)
 # search and replace strings with other strings
 filters:
   - s: '%%SEARCH_REPLACE%%'
     r: 'Hello, world.'
 
-# eval
+# eval (optional)
 # a Perl-evaluated "preprocess" step a-la C/C++
 eval:
     'ABC' : 0
@@ -31,28 +31,41 @@ targets:
     # specify all targets under here
 
     target1:
-        # target-specific files can be added here
+        # target-specific files can be added here (optional)
         # files can me renamed by specifying a mapping
         files:
           - 'anotherfile': 'some_file'
 
-        # target-specific filters can be added here
+        # target-specific filters can be added here (optional)
         # filters defined globally can be overwritten here
         filters:
           - s: '%%SEARCH_REPLACE%%'
             r: 'Hi, planet.'
 
-        # target-specific evals can be added here
+        # target-specific evals can be added here (optional)
         # evals defined globally can be overwritten here
         eval:
             'ABC' : 1
 
-        # deploy
+        # also (optional)
+        # specify other targets to build and deploy
+        # may specify other config files by using a mapping
+        # infinite recursion avoided by not allowing parents to build themselves
+        also:
+          - target2
+#         - another_build: '../some_project/build.yaml'
+
+        # deploy (optional)
         # can have multiple deploy locations (in which case, must refer to an array)
         # can deploy to remote servers (uses rsync)
         deploy:
-            #server: 'google.com'
-            #user:   'bob'
+#           server: 'google.com'
+#           user:   'bob'
             dir:    '.deploy/'
+
+    target2:
+        deploy:
+          - dir:    '.deploy2a/'
+          - dir:    '.deploy2b/'
 
 # more undocumented features!

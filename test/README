@@ -13,6 +13,13 @@ target           target1
 source dir       /Users/geoff/Documents/github/build/test/
 building to      /Users/geoff/Documents/github/build/test/.build/target1/
 deploying to     /Users/geoff/Documents/github/build/test/.deploy/
+==[1]== building...
+using            /Users/geoff/Documents/github/build/test/build.yaml
+target           target2
+source dir       /Users/geoff/Documents/github/build/test/
+building to      /Users/geoff/Documents/github/build/test/.build/target2/
+deploying to     /Users/geoff/Documents/github/build/test/.deploy2a/
+deploying to     /Users/geoff/Documents/github/build/test/.deploy2b/
 === done
 
 # filters and preprocessing are run on copies of your source files in the "build" step
