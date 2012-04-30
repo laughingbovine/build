@@ -1,0 +1,53 @@
+# learn YAML real quick: https://www.google.com/search?q=yaml+tutorial
+
+# build_basedir
+# directory where all builds ("stage" step) will be based (subdirs created for each target)
+build_basedir: .build/
+
+# git_basedir (optional)
+# directory where git repos will reside (subdirs created for each target)
+# commits made after every build and deploy (and labled accordingly)
+git_basedir: .repo/
+
+# files
+# list of files to be built/deployed
+files:
+  - 'afile'
+
+# filters
+# search and replace strings with other strings
+filters:
+  - s: '%%SEARCH_REPLACE%%'
+    r: 'Hello, world.'
+
+# eval
+# a Perl-evaluated "preprocess" step a-la C/C++
+eval:
+    'ABC' : 0
+
+targets:
+    # specify all targets under here
+
+    target1:
+        # target-specific files can be added here
+        files:
+          - 'anotherfile'
+
+        # target-specific filters can be added here
+        filters:
+          - s: '%%SEARCH_REPLACE%%'
+            r: 'Hi, planet.'
+
+        # target-specific evals can be added here
+        eval:
+            'ABC' : 1
+
+        # deploy
+        # can have multiple deploy locations (in which case, must refer to an array)
+        # can deploy to remote servers (uses rsync)
+        deploy:
+            #server: 'google.com'
+            #user:   'bob'
+            dir:    '.deploy/'
+
+# more undocumented features!

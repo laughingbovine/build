@@ -1,0 +1,7 @@
+%%SEARCH_REPLACE%%
+
+#if $ABC
+preprocess this!
+#else
+or not?
+#endif

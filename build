@@ -1,0 +1,1021 @@
+#!%%PERL_LOCATION%%
+
+use warnings;
+use strict;
+
+use lib "%%PERL_LIB_LOCATION%%";
+
+use Carp;
+use Data::Dumper;
+
+use Cwd;
+use File::Basename qw(fileparse);
+use YAML::XS qw(LoadFile);
+use Getopt::Long;
+use Sys::Hostname;
+
+use Filter;
+
+my $VERBOSE = 0;
+
+# "external" util functions
+################################################################################
+
+sub shell
+{
+    my ($verbose, $command) = @_;
+
+    return unless $command;
+
+    if ($verbose)
+    {
+        my $prefixed_command = $command;
+        $prefixed_command =~ s/^/!!!:/gm;
+        $prefixed_command =~ s/\s*$/\n/;
+        print $prefixed_command;
+
+        my @output = `$command 2>&1`;
+        chomp(@output);
+
+        printf("---:%s\n", $_) foreach @output;
+    }
+    else
+    {
+        #system($command) == 0 or die "error running '$command': $! - $?";
+        system($command);
+    }
+
+    if ($? == -1)
+    {
+        die sprintf("running '%s': failed to execute: %s\n", $command, $!);
+    }
+    elsif ($? & 127)
+    {
+        die sprintf("running '%s': died with signal: %d, %s coredump\n", $command, ($? & 127), ($? & 128) ? 'with' : 'without');
+    }
+    elsif ($? != 0)
+    {
+        die sprintf("running '%s': exited with value: %d\n", $command, $? >> 8);
+    }
+}
+
+sub run_commands_in_
+{
+    my ($verbose, $destination, @commands) = @_;
+
+    #print Dumper(\@_);
+
+    # either the destination is local or remote
+    if (not ref($destination))
+    {
+        # local
+        my $dir = $destination;
+
+        foreach my $command (@commands)
+        {
+            shell($verbose, "(cd $dir; $command)");
+        }
+    }
+    elsif (ref($destination) eq 'HASH' and $destination->{dir} and not (defined($destination->{server}) and $destination->{server}))
+    {
+        # local
+        my $dir = $destination->{dir};
+
+        foreach my $command (@commands)
+        {
+            shell($verbose, "(cd $dir; $command)");
+        }
+    }
+    elsif (ref($destination) eq 'HASH' and defined($destination->{server}) and $destination->{server})
+    {
+        # remote
+        my $connect = $destination->{server};
+        $connect = $destination->{user}.'@'.$connect if $destination->{user};
+
+        my $pre_command = "ssh -T $connect <<'ENDSSH'\n";
+        $pre_command .= "cd $destination->{dir}\n" if $destination->{dir};
+
+        my $post_command = "\nENDSSH\n";
+
+        foreach my $command (@commands)
+        {
+            shell($verbose, $pre_command.$command.$post_command);
+        }
+    }
+}
+
+sub dirname
+{
+    my ($path) = @_;
+
+    my (undef, $result, undef) = fileparse($path);
+
+    return $result;
+}
+
+sub resolve_path
+{
+    my (@path_parts) = @_;
+
+    unshift @path_parts, cwd();
+
+    my $path = '';
+
+    foreach my $path_part (reverse(@path_parts)) # reverse!
+    {
+        if ($path_part)
+        {
+            if ($path and $path !~ m|^/| and $path_part !~ m|/$|)
+            {
+                $path = $path_part.'/'.$path;
+            }
+            else
+            {
+                $path = $path_part.$path;
+            }
+        }
+
+        last if $path =~ m[^/|~];
+    }
+
+    return $path;
+}
+
+sub prepare_copy
+{
+    my ($src_dir, $dst_dir) = @_;
+
+    my @commands;
+
+    my @stat    = stat($src_dir);
+    my $mode    = sprintf("%04o", $stat[2] & 0777);
+    my $uname   = getpwuid($stat[4]);
+    my $gname   = getgrgid($stat[5]);
+
+    push @commands, qq[rm -rf '$dst_dir';] if -d $dst_dir;
+    push @commands, qq[mkdir -p '$dst_dir';];
+    push @commands, qq[chmod $mode '$dst_dir';];
+    push @commands, qq[chown $uname:$gname '$dst_dir';];
+
+    shell($VERBOSE > 2, join("\n", @commands));
+}
+
+sub copy_file
+{
+    my ($src, $dst);
+    my $copy_command = 'cp -p';
+
+    if (@_ == 3)
+    {
+        ($copy_command, $src, $dst) = @_;
+    }
+    elsif (@_ == 2)
+    {
+        ($src, $dst) = @_;
+    }
+
+    die "copy_file(): source path '$src' is not a file" unless -f $src;
+
+    my $src_dir = dirname($src);
+    my $dst_dir = dirname($dst);
+
+    my @commands;
+
+    unless (-d $dst_dir)
+    {
+        my @stat    = stat($src_dir);
+        my $mode    = sprintf("%04o", $stat[2] & 0777);
+        my $uname   = getpwuid($stat[4]);
+        my $gname   = getgrgid($stat[5]);
+
+        push @commands,
+            qq[mkdir -p '$dst_dir';],
+            qq[chmod $mode '$dst_dir';],
+            qq[chown $uname:$gname '$dst_dir';];
+    }
+
+    push @commands,
+        qq[$copy_command '$src' '$dst';];
+
+    shell($VERBOSE > 2, join("\n", @commands));
+}
+
+sub git_archive
+{
+    my ($work_dir, $repo_dir, $label) = @_;
+
+    return unless $work_dir and $repo_dir;
+
+    $label ||= 'auto-commit';
+
+    my @commands;
+
+    if ($VERBOSE > 2)
+    {
+        push @commands, qq[git init --bare '$repo_dir'] unless -d $repo_dir;
+        push @commands, qq[git --work-tree '$work_dir' --git-dir '$repo_dir' add -Av . && git --work-tree '$work_dir' --git-dir '$repo_dir' commit -v --allow-empty -m "$label -- `date`"];
+    }
+    else
+    {
+        push @commands, qq[git init -q --bare '$repo_dir'] unless -d $repo_dir;
+        push @commands, qq[git --work-tree '$work_dir' --git-dir '$repo_dir' add -A . && git --work-tree '$work_dir' --git-dir '$repo_dir' commit -q --allow-empty -m "$label -- `date`"];
+    }
+
+    shell($VERBOSE > 2, join("\n", @commands));
+}
+
+# "internal" util functions
+################################################################################
+
+# takes an array of stuff and returns the only defined+true scalar in there
+# dies if there is more than one
+sub flatten_s
+{
+    my $result;
+
+    foreach (@_)
+    {
+        if (defined($_) and $_)
+        {
+            croak 'flatten_s(): multiple hits' if $result;
+
+            $result = $_;
+        }
+    }
+
+    return $result;
+}
+
+# takes an array of stuff and returns an array with all incoming arrayref's flattened (1 level)
+# and all undefined/false values excluded
+sub flatten_a
+{
+    my @result;
+
+    foreach (@_)
+    {
+        next unless defined($_) and $_;
+
+        if (ref($_) eq 'ARRAY')
+        {
+            push @result, @$_;
+        }
+        else
+        {
+            push @result, $_;
+        }
+    }
+
+    return \@result;
+}
+
+# takes an array of stuff and returns a hash with all incoming hashref's flattened (1 level)
+# all undefined/false values excluded
+# stuff that isn't a hashref is assumed to be a key followed by a value, hash-in-an-array style
+sub flatten_h
+{
+    my %result;
+
+    my $el;
+    while (@_)
+    {
+        $el = shift(@_);
+
+        next unless defined($el) and $el;
+
+        if (ref($el) eq 'HASH')
+        {
+            foreach my $k (keys %$el)
+            {
+                #croak 'flatten_h(): key overlap' if exists $result{$k};
+
+                $result{$k} = $el->{$k};
+            }
+        }
+        else
+        {
+            croak 'flatten_h(): unbalanced input' unless @_ > 0;
+
+            $result{$el} = shift(@_);
+        }
+    }
+
+    return \%result;
+}
+
+# accepts a scalar, a hashref, or an arrayref
+# whichever it is, it must resolve to one or two values or this sub dies
+# scalar context gives the first element that array context would give
+# scalar    - ($o, undef)
+# array     - ($o->[0], $o->[1]?)
+# hash      - (key, $o->{key})
+sub one_or_two
+{
+    my ($o) = @_;
+
+    if (ref($o) eq 'HASH')
+    {
+        my @keys = keys %$o;
+        croak "obj is a hashref and num keys is not 1" if @keys != 1;
+
+        return wantarray ? ($keys[0], $o->{$keys[0]}) : $keys[0];
+    }
+    elsif (ref($o) eq 'ARRAY')
+    {
+        if (@$o == 1)
+        {
+            return wantarray ? ($o->[0], undef) : $o->[0];
+        }
+        elsif (@$o == 2)
+        {
+            return wantarray ? ($o->[0], $o->[1]) : $o->[0];
+        }
+        else
+        {
+            croak "obj is a arrayref and num values is not 1 or 2";
+        }
+    }
+    elsif (not ref($o))
+    {
+        return wantarray ? ($o, undef) : $o;
+    }
+}
+
+# if obj is a hashref, assert that it only has 1 k/v pair and return the k, v
+# otherwise return the obj (twice)
+# TODO: merge this and above somehow
+sub single_hashref_or_scalar
+{
+    my ($o) = @_;
+
+    my ($k, $v);
+
+    if (ref($o) eq 'HASH')
+    {
+        my @keys = keys %$o;
+
+        if (@keys == 1)
+        {
+            $k = $keys[0];
+            $v = $o->{$keys[0]};
+        }
+        else
+        {
+            croak "single_hashref_or_scalar(): obj is a hash, but num keys != 1";
+        }
+    }
+    else
+    {
+        $k = $v = $o;
+    }
+
+    return ($k, $v);
+}
+
+# core functions
+################################################################################
+
+my %configs;
+
+sub check_config_cache
+{
+    my ($config, $target_name, $cache) = @_;
+
+    $cache ||= \%configs;
+
+    my $config_path = ref($config) eq 'HASH' ? $config->{TEMP}{path} : $config;
+
+    if ($target_name) # looking for a target config
+    {
+        return exists($cache->{$config_path}{TEMP}{targets}{$target_name}{TEMP}) ? $cache->{$config_path}{TEMP}{targets}{$target_name} : 0;
+    }
+    else # looking for a build config
+    {
+        return $cache->{$config_path} || 0;
+    }
+}
+
+# make sure we have a config that is acceptable
+# we wind up creating a "sub-space" in the variable we get from YAML called TEMP
+# this is so we only have to flatten/load stuff once
+sub get_build_config
+{
+    my ($yaml_file) = @_;
+    my %ss; # sub-space var
+
+    # figure out full path of the yaml file
+    $ss{path} = resolve_path($yaml_file);
+
+    # check cache
+    my $cache = check_config_cache($ss{path});
+    return $cache if $cache;
+
+    # assert file exists
+    die "could not find $yaml_file" unless (-f $yaml_file);
+
+    # YAML load
+    my $config = LoadFile($yaml_file);
+
+    # force users to update their configs
+    die "\n*** using 'details' is deprecated\n" if exists $config->{'details'};
+
+    # check for a source directory
+    $ss{source_dir} = flatten_s(
+        $config->{'source_dir'},
+        $config->{'source-dir'},
+    );
+
+    # check for a build base directory
+    $ss{build_basedir} = flatten_s(
+        $config->{'build_basedir'},
+        $config->{'build-basedir'},
+    );
+
+    # check for a git base directory
+    $ss{git_basedir} = flatten_s(
+        $config->{'git_basedir'},
+        $config->{'git-basedir'},
+    );
+
+    # check for targets
+    $ss{targets} = flatten_h(
+        $config->{target},
+        $config->{targets},
+    );
+
+    # populate our "sub-space"
+    $config->{TEMP} = \%ss;
+
+    # caching
+    $configs{$ss{path}} = $config;
+
+    return $config;
+}
+
+# get a config and list all possible targets
+sub list_all_targets
+{
+    my ($config) = @_;
+
+    # call get_build_config() if we weren't passed a config 'object' (assume it's a filename)
+    $config = get_build_config($config) if ref($config) ne 'HASH';
+
+    foreach my $target_name (sort keys %{$config->{TEMP}{targets}})
+    {
+        print "$target_name\n";
+    }
+}
+
+# make sure we have a target config that is acceptable
+# we wind up creating a "sub-space" in the target variable called TEMP
+# this is so we only have to flatten/load stuff once
+sub get_target_config
+{
+    my ($config, $target_name) = @_;
+    my %ss; # sub-space var
+
+    # check cache
+    my $cache = check_config_cache($config, $target_name);
+    return $cache if $cache;
+
+    # call get_build_config() if we weren't passed a config 'object' (assume it's a filename)
+    $config = get_build_config($config) if ref($config) ne 'HASH';
+    $ss{config} = $config;
+
+    # assert target name
+    my $target = $config->{TEMP}{targets}{$target_name} or die "no target found named '$target_name'";
+
+    die "*** using '(target)->build' is deprecated\n" if exists $target->{'build'};
+
+    # check for a source directory
+    $ss{source_dir} = flatten_s(
+        $target->{'source_dir'},
+        $target->{'source-dir'},
+    ) || $config->{TEMP}{source_dir};
+    $ss{source_dir} = resolve_path(dirname($config->{TEMP}{path}), $ss{source_dir});
+
+    die "*** using '(target)->dir' is deprecated\n" if exists $target->{'dir'};
+
+    # check for a build dir
+    $ss{build_dir} = flatten_s(
+        $target->{'build_dir'},
+        $target->{'build-dir'},
+    ) || ($config->{TEMP}{build_basedir} ? $config->{TEMP}{build_basedir}.$target_name.'/' : 0);
+    $ss{build_dir} = resolve_path(dirname($config->{TEMP}{path}), $ss{build_dir}) if $ss{build_dir};
+
+    # check for a git dir
+    $ss{git_dir} = flatten_s(
+        $target->{'git_dir'},
+        $target->{'git-dir'},
+    ) || ($config->{TEMP}{git_basedir} ? $config->{TEMP}{git_basedir}.$target_name.'/' : 0);
+    $ss{git_dir} = resolve_path(dirname($config->{TEMP}{path}), $ss{git_dir}) if $ss{git_dir};
+
+    # check for deployments
+    $ss{deploy_configs} = [];
+
+    if ($target->{deploy})
+    {
+        if (ref($target->{deploy}) eq 'ARRAY')
+        {
+            # multiple deployments
+            push @{$ss{deploy_configs}}, @{$target->{deploy}};
+        }
+        else
+        {
+            push @{$ss{deploy_configs}}, $target->{deploy};
+        }
+    }
+
+    foreach my $deploy_config (@{$ss{deploy_configs}})
+    {
+        if ($deploy_config->{dir} and not $deploy_config->{server})
+        {
+            # this deploy is local, run it through resolve_path()
+            $deploy_config->{dir} = resolve_path(dirname($config->{TEMP}{path}), $deploy_config->{dir});
+        }
+    }
+
+    # come up with list of files
+    $ss{files} = flatten_a(
+        $config->{'files'},
+        $target->{'additional_files'},
+        $target->{'additional-files'},
+        $target->{'files'},
+    );
+    $ss{static_files} = flatten_a(
+        $config->{'static_files'},
+        $config->{'static-files'},
+        $target->{'additional_static_files'},
+        $target->{'additional-static-files'},
+        $target->{'static_files'},
+        $target->{'static-files'},
+    );
+
+    # get our filters and evals
+    # TODO: filters shouldnt have to be [{s=>blah, r=>blah}, ...], but maybe (blah=>blah, ...)
+    # more-generic filters/evals are listed before more-specific ones, so target-specific filters/evals will always take precedence
+    $ss{filters} = flatten_a(
+        $config->{filter},
+        $config->{filters},
+        $target->{filter},
+        $target->{filters},
+    );
+    $ss{evals} = flatten_h(
+        $config->{eval},
+        $config->{evals},
+        $target->{eval},
+        $target->{evals},
+    );
+
+    # get commands for our "hooks"
+    $ss{hook_before_filter} = flatten_a(
+        $config->{'before_filter'},
+        $config->{'before-filter'},
+        $config->{'before_filters'},
+        $config->{'before-filters'},
+        $target->{'before_filter'},
+        $target->{'before-filter'},
+        $target->{'before_filters'},
+        $target->{'before-filters'},
+    );
+    $ss{hook_after_filter} = flatten_a(
+        $config->{'after_filter'},
+        $config->{'after-filter'},
+        $config->{'after_filters'},
+        $config->{'after-filters'},
+        $target->{'after_filter'},
+        $target->{'after-filter'},
+        $target->{'after_filters'},
+        $target->{'after-filters'},
+    );
+    foreach my $deploy_config (@{$ss{deploy_configs}})
+    {
+        $deploy_config->{hook_before_deploy} = flatten_a(
+            $config->{'before_deploy'},
+            $config->{'before-deploy'},
+            $target->{'before_deploy'},
+            $target->{'before-deploy'},
+            $deploy_config->{'before_deploy'},
+            $deploy_config->{'before-deploy'},
+        );
+
+        $deploy_config->{hook_after_deploy} = flatten_a(
+            $config->{'after_deploy'},
+            $config->{'after-deploy'},
+            $target->{'after_deploy'},
+            $target->{'after-deploy'},
+            $deploy_config->{'after_deploy'},
+            $deploy_config->{'after-deploy'},
+        );
+    }
+
+    # get other builds to run in addition to this one
+    $ss{also_before} = flatten_a(
+        $config->{'build_before'},
+        $config->{'build-before'},
+        $target->{'build_before'},
+        $target->{'build-before'},
+    );
+    $ss{also_after} = flatten_a(
+        $config->{'build_after'},
+        $config->{'build-after'},
+        $config->{'also'},
+        $target->{'build_after'},
+        $target->{'build-after'},
+        $target->{'also'},
+    );
+
+    $ss{also_after_hostname} = flatten_h(
+        $config->{'build_on_host'},
+        $config->{'build-on-host'},
+        $target->{'build_on_host'},
+        $target->{'build-on-host'},
+    );
+
+    # populate "sub-space"
+    $target->{TEMP} = \%ss;
+
+    return $target;
+}
+
+# this sub will do all the sub-build magic
+# given a config and a target, will recursively load all specified sub-build configs along with the specified targets
+# then will return the list of all builds to execute
+# infinite recursion is avoided by preventing child builds from walking to already-existing parent builds
+# NOTE: this means that it still is possible for a sub-build to run more than once.  this is intended.
+sub traverse_also
+{
+    my ($config, $target_name, $parent_tree_node) = @_;
+    my @result;
+
+    # call get_build_config() if we weren't passed a config 'object' (assume it's a filename)
+    $config = get_build_config($config) if ref($config) ne 'HASH';
+
+    # get the config file's path
+    my $config_path = $config->{TEMP}{path};
+
+    # our spot in the tree
+    my $current_tree_node = {parent => $parent_tree_node, parent_count => 0, config_path => $config_path, target_name => $target_name};
+
+    # first make sure that my ancestors did not process this target already
+    my $node = $current_tree_node;
+    while ($node = $node->{parent})
+    {
+        # check to see if this thing was loaded
+        # that is: do the config file path and the target name match
+        return [] if $node->{config_path} eq $config_path and $node->{target_name} eq $target_name;
+
+        $current_tree_node->{parent_count}++;
+    }
+    # okay!  we're infinite-recursion-free!
+
+    # get target
+    my $target = get_target_config($config, $target_name);
+
+    # do "before" builds
+    foreach my $also (@{$target->{TEMP}{also_before}})
+    {
+        my ($also_target_name, $also_config_file) = one_or_two($also);
+
+        # use current config if none specified
+        my $sub_result = traverse_also($also_config_file || $config, $also_target_name, $current_tree_node);
+
+        push @result, @$sub_result;
+    }
+
+    # current build
+    #push @result, [$config_path, $target_name];
+    push @result, $current_tree_node;
+
+    # do "after" builds
+    foreach my $also (@{$target->{TEMP}{also_after}})
+    {
+        my ($also_target_name, $also_config_file) = one_or_two($also);
+
+        my $sub_result = traverse_also($also_config_file || $config, $also_target_name, $current_tree_node);
+
+        push @result, @$sub_result;
+    }
+
+    # do host-specific "after" builds
+    my $also_after_hostname = $target->{TEMP}{also_after_hostname}{hostname()};
+
+    if ($also_after_hostname and @$also_after_hostname)
+    {
+        foreach my $also (@$also_after_hostname)
+        {
+            my ($also_target_name, $also_config_file) = one_or_two($also);
+
+            my $sub_result = traverse_also($also_config_file || $config, $also_target_name, $current_tree_node);
+
+            push @result, @$sub_result;
+        }
+    }
+
+    return \@result;
+}
+
+# and... action!
+sub build_target
+{
+    my ($config, $target_name) = @_;
+
+    my $target = get_target_config($config, $target_name);
+
+    # make this easier on ourselves
+    my $config_path     = $target->{TEMP}{config}{TEMP}{path};
+    my $source_dir      = $target->{TEMP}{source_dir};
+    my $build_dir       = $target->{TEMP}{build_dir};
+    my $git_dir         = $target->{TEMP}{git_dir};
+    my $files           = $target->{TEMP}{files};
+    my $static_files    = $target->{TEMP}{static_files};
+    my $filters         = $target->{TEMP}{filters};
+    my $evals           = $target->{TEMP}{evals};
+
+    my $hook_before_filter  = $target->{TEMP}{hook_before_filter};
+    my $hook_after_filter   = $target->{TEMP}{hook_after_filter};
+
+    my $file_count = @$static_files + @$files;
+
+    # before anything, make sure we're configured enough to actually do stuff
+    unless ($source_dir and $build_dir and $file_count > 0)
+    {
+        print "using        $config_path\n";
+        print "target       $target_name\n";
+        print "nothing to do\n";
+        return 0;
+    }
+
+    # print some info before we do our thing
+    print "using            $config_path\n";
+    print "target           $target_name\n";
+    print "source dir       $source_dir\n";
+    print "building to      $build_dir\n";
+
+    # copy to build (staging) area
+    #------------------------------------------------------------------------------#
+    # make sure a clear build dir exists
+    prepare_copy($source_dir, $build_dir);
+
+    # prepare file lists - use hashes since file mappings can be overwritten
+    my %static_files;
+    my %files;
+
+    foreach my $source (@$static_files)
+    {
+        my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
+
+        $static_files{$source_file_name} = $build_file_name;
+    }
+
+    foreach my $source (@$files)
+    {
+        my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
+
+        $files{$source_file_name} = $build_file_name;
+    }
+
+    # copy source dir files into build dir preserving directory structure and file attributes
+    # static:
+    foreach my $source_file_name (keys %static_files)
+    {
+        my $build_file_name = $static_files{$source_file_name};
+
+        my $source_file_path    = $source_dir.$source_file_name;
+        my $build_file_path     = $build_dir.$build_file_name;
+
+        # let's do a hard link instead of an actual copy.  after all, this file isnt supposed to change, right?
+        copy_file('ln', $source_file_path, $build_file_path);
+    }
+
+    # non-static:
+    foreach my $source_file_name (keys %files)
+    {
+        my $build_file_name = $files{$source_file_name};
+
+        my $source_file_path    = $source_dir.$source_file_name;
+        my $build_file_path     = $build_dir.$build_file_name;
+
+        copy_file($source_file_path, $build_file_path);
+    }
+
+    # hooks - before build
+    #------------------------------------------------------------------------------#
+    if (@$hook_before_filter)
+    {
+        run_commands_in_($VERBOSE > 0, $build_dir, @$hook_before_filter);
+    }
+
+    # filter - search/replace
+    #------------------------------------------------------------------------------#
+    # filter all files through all filters
+    if (@$filters)
+    {
+        # merge filters (in order, of course)
+        my %target_filter_config;
+        foreach my $filter_config (@$filters)
+        {
+            $target_filter_config{$filter_config->{s}} = $filter_config->{r};
+        }
+
+        # generate master filter
+        my @filter_subs;
+
+        foreach my $search (keys %target_filter_config)
+        {
+            my $replace = $target_filter_config{$search};
+
+            # be sure to disable all perl regex metacharacters (with '\Q' and '\E')
+            push @filter_subs, sub { ${$_[0]} =~ s/\Q$search\E/$replace/g };
+        }
+
+        my $master_filter = Filter::generate_filter_group(@filter_subs);
+
+        # run master filter on each file
+        foreach my $build_file_name (values %files)
+        {
+            my $build_file_path = $build_dir.$build_file_name;
+
+            Filter::filter_file($build_file_path, $master_filter);
+        }
+    }
+
+    # filter - eval
+    #------------------------------------------------------------------------------#
+    # run all files through the eval "filter"
+    if (%$evals)
+    {
+        # run eval on each file
+        foreach my $build_file_name (values %files)
+        {
+            my $build_file_path = $build_dir.$build_file_name;
+
+            Filter::filter_file_eval($build_file_path, $evals);
+        }
+    }
+
+    # hooks - after build
+    #------------------------------------------------------------------------------#
+    if (@$hook_after_filter)
+    {
+        run_commands_in_($VERBOSE > 0, $build_dir, @$hook_after_filter);
+    }
+
+    # archive
+    #------------------------------------------------------------------------------#
+    git_archive($build_dir, $git_dir, 'build');
+
+    return 1;
+}
+
+sub deploy_target
+{
+    my ($config, $target_name) = @_;
+
+    my $target = get_target_config($config, $target_name);
+
+    my $deploy_configs  = $target->{TEMP}{deploy_configs};
+    my $build_dir       = $target->{TEMP}{build_dir};
+    my $git_dir         = $target->{TEMP}{git_dir};
+
+    # before anything, make sure we're configured enough to actually do stuff
+    unless (@$deploy_configs)
+    {
+        print "nothing to deploy\n";
+        return 0;
+    }
+
+    # hooks - before deploy
+    #------------------------------------------------------------------------------#
+    foreach my $deploy_config (@$deploy_configs)
+    {
+        if (@{$deploy_config->{hook_before_deploy}})
+        {
+            run_commands_in_($VERBOSE > 0, $deploy_config, @{$deploy_config->{hook_before_deploy}});
+        }
+    }
+
+    # deploy
+    #------------------------------------------------------------------------------#
+    foreach my $deploy_config (@$deploy_configs)
+    {
+        # come up with destination string
+        my $destination = $deploy_config->{dir} || '';
+
+        if ($deploy_config->{server})
+        {
+            $destination = $deploy_config->{server}.':'.$destination;
+
+            if ($deploy_config->{user})
+            {
+                $destination = $deploy_config->{user}.'@'.$destination;
+            }
+        }
+
+        # info
+        print "deploying to     $destination\n";
+
+        # rsync
+        shell($VERBOSE > 1, "rsync ".($VERBOSE > 1 ? '-rcCv' : '-rcCq')." $build_dir $destination");
+    }
+
+    # hooks - after deploy
+    #------------------------------------------------------------------------------#
+    foreach my $deploy_config (@$deploy_configs)
+    {
+        if (@{$deploy_config->{hook_before_deploy}})
+        {
+            run_commands_in_($VERBOSE > 0, $deploy_config, @{$deploy_config->{hook_before_deploy}});
+        }
+    }
+
+    # archive
+    #------------------------------------------------------------------------------#
+    git_archive($build_dir, $git_dir, 'deploy');
+
+    return 1;
+}
+
+################################################################################
+################################################################################
+################################################################################
+
+# getopt
+################################################################################
+
+Getopt::Long::Configure('bundling'); # allow single-dash options
+
+my $opt_list;
+my $opt_config_file = 'build.yaml';
+my ($opt_build_only, $opt_deploy_only) = @_;
+#my $opt_recurse;
+
+GetOptions(
+    'v|verbose+'        => \$VERBOSE,
+    'l|list'            => \$opt_list,
+    'f|yaml|config=s'   => \$opt_config_file,
+    'b|build-only'      => \$opt_build_only,
+    'd|deploy-only'     => \$opt_deploy_only,
+#   'r|recurse'         => \$opt_recurse,
+);
+
+# handle '-l' option (list all targets)
+################################################################################
+
+if ($opt_list)
+{
+    list_all_targets($opt_config_file);
+
+    exit;
+}
+
+# process target names
+################################################################################
+
+my @target_names = @ARGV;
+
+unless (@target_names > 0)
+{
+    push @target_names, 'default';
+}
+
+# do builds
+################################################################################
+
+foreach my $target_name (@target_names)
+{
+    # get a list of targets (this current target and all its "also" targets)
+    my $also_list = traverse_also($opt_config_file, $target_name);
+    my %also_counter;
+
+    #print Dumper($also_list);
+
+    foreach (@$also_list)
+    {
+        $also_counter{$_->{config_path}}{$_->{target_name}}++;
+
+        if ($also_counter{$_->{config_path}}{$_->{target_name}} > 1)
+        {
+            print "==[$_->{parent_count}]== building (x$also_counter{$_->{config_path}}{$_->{target_name}})...\n";
+        }
+        else
+        {
+            print "==[$_->{parent_count}]== building...\n";
+        }
+
+        if ($opt_build_only and not $opt_deploy_only)
+        {
+            build_target($_->{config_path}, $_->{target_name});
+        }
+        elsif (not $opt_build_only and $opt_deploy_only)
+        {
+            deploy_target($_->{config_path}, $_->{target_name});
+        }
+        else
+        {
+            build_target($_->{config_path}, $_->{target_name}) && deploy_target($_->{config_path}, $_->{target_name});
+        }
+    }
+}
+
+print "=== done\n";
