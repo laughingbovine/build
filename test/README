@@ -1,9 +1,11 @@
 Example
 ################################################################################
 
+# list all targets
 geoff@local:~/Documents/github/build/test$ build -l
 target1
 
+# build and deploy (in one command =)
 geoff@local:~/Documents/github/build/test$ build target1 
 ==[0]== building...
 using            /Users/geoff/Documents/github/build/test/build.yaml
@@ -13,14 +15,15 @@ building to      /Users/geoff/Documents/github/build/test/.build/target1/
 deploying to     /Users/geoff/Documents/github/build/test/.deploy/
 === done
 
+# filters and preprocessing are run on copies of your source files in the "build" step
+# files are then deployed (rsync'd) to their final destination
 geoff@local:~/Documents/github/build/test$ cat .deploy/afile
 Hi, planet.
 
 preprocess this!
 
-geoff@local:~/Documents/github/build/test$ cat .deploy/anotherfile 
-Greetings.
-
+# if you set up a repo, every build and deply will be committed
+# you can even clone it, though that's probably a bad idea (meant to be read-only)
 geoff@local:~/Documents/github/build/test$ git clone .repo/target1/ deploy_repo
 Cloning into 'deploy_repo'...
 done.
@@ -32,10 +35,13 @@ total 16
 -rw-r--r--  1 geoff  staff  30 Apr 30 12:37 afile
 -rw-r--r--  1 geoff  staff  11 Apr 30 12:37 anotherfile
 
+geoff@local:~/Documents/github/build/test/deploy_repo$ git log --oneline
+5c34708 deploy -- Mon Apr 30 12:36:28 EDT 2012
+b80a379 build -- Mon Apr 30 12:36:28 EDT 2012
+1fa0e35 deploy -- Mon Apr 30 12:31:14 EDT 2012
+6e878e3 build -- Mon Apr 30 12:31:14 EDT 2012
+
 geoff@local:~/Documents/github/build/test/deploy_repo$ cat afile 
 Hi, planet.
 
 preprocess this!
-
-geoff@local:~/Documents/github/build/test/deploy_repo$ cat anotherfile 
-Greetings.
