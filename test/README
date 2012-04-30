@@ -34,7 +34,7 @@ geoff@local:~/Documents/github/build/test$ cat .deploy/some_file
 Greetings.
 
 # if you set up a repo, every build and deploy will be committed
-# you can even clone it, though that's probably a bad idea (meant to be read-only)
+# you can clone it to see the deploy history, just don't make your own commits
 geoff@local:~/Documents/github/build/test$ git clone .repo/target1/ deploy_repo
 Cloning into 'deploy_repo'...
 done.
