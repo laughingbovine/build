@@ -21,6 +21,8 @@ geoff@local:~/Documents/github/build/test$ cat .deploy/afile
 Hi, planet.
 
 preprocess this!
+geoff@local:~/Documents/github/build/test$ cat .deploy/some_file 
+Greetings.
 
 # if you set up a repo, every build and deply will be committed
 # you can even clone it, though that's probably a bad idea (meant to be read-only)
@@ -33,7 +35,7 @@ geoff@local:~/Documents/github/build/test$ cd deploy_repo/
 geoff@local:~/Documents/github/build/test/deploy_repo$ ls -l
 total 16
 -rw-r--r--  1 geoff  staff  30 Apr 30 12:37 afile
--rw-r--r--  1 geoff  staff  11 Apr 30 12:37 anotherfile
+-rw-r--r--  1 geoff  staff  11 Apr 30 12:37 some_file
 
 geoff@local:~/Documents/github/build/test/deploy_repo$ git log --oneline
 5c34708 deploy -- Mon Apr 30 12:36:28 EDT 2012

@@ -30,15 +30,18 @@ targets:
 
     target1:
         # target-specific files can be added here
+        # files can me renamed by specifying a mapping
         files:
-          - 'anotherfile'
+          - 'anotherfile': 'some_file'
 
         # target-specific filters can be added here
+        # filters defined globally can be overwritten here
         filters:
           - s: '%%SEARCH_REPLACE%%'
             r: 'Hi, planet.'
 
         # target-specific evals can be added here
+        # evals defined globally can be overwritten here
         eval:
             'ABC' : 1
 
