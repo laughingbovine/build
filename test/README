@@ -4,6 +4,7 @@ Example
 # list all targets
 geoff@local:~/Documents/github/build/test$ build -l
 target1
+target2
 
 # build and deploy (in one command =)
 geoff@local:~/Documents/github/build/test$ build target1 
