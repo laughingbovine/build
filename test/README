@@ -33,7 +33,7 @@ preprocess this!
 geoff@local:~/Documents/github/build/test$ cat .deploy/some_file 
 Greetings.
 
-# if you set up a repo, every build and deply will be committed
+# if you set up a repo, every build and deploy will be committed
 # you can even clone it, though that's probably a bad idea (meant to be read-only)
 geoff@local:~/Documents/github/build/test$ git clone .repo/target1/ deploy_repo
 Cloning into 'deploy_repo'...
