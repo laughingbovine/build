@@ -17,6 +17,7 @@ deploying to     /Users/geoff/Documents/github/build/test/.deploy/
 
 # filters and preprocessing are run on copies of your source files in the "build" step
 # files are then deployed (rsync'd) to their final destination
+geoff@local:~/Documents/github/build/test$ diff -rq .build/target1/ .deploy/
 geoff@local:~/Documents/github/build/test$ cat .deploy/afile
 Hi, planet.
 
