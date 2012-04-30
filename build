@@ -485,7 +485,7 @@ sub get_target_config
     # assert target name
     my $target = $config->{TEMP}{targets}{$target_name} or die "no target found named '$target_name'";
 
-    die "*** using '(target)->build' is deprecated\n" if exists $target->{'build'};
+    die "\n*** using '(target)->build' is deprecated\n" if exists $target->{'build'};
 
     # check for a source directory
     $ss{source_dir} = flatten_s(
@@ -494,7 +494,7 @@ sub get_target_config
     ) || $config->{TEMP}{source_dir};
     $ss{source_dir} = resolve_path(dirname($config->{TEMP}{path}), $ss{source_dir});
 
-    die "*** using '(target)->dir' is deprecated\n" if exists $target->{'dir'};
+    die "\n*** using '(target)->dir' is deprecated\n" if exists $target->{'dir'};
 
     # check for a build dir
     $ss{build_dir} = flatten_s(
@@ -785,7 +785,10 @@ sub build_target
         my $build_file_path     = $build_dir.$build_file_name;
 
         # let's do a hard link instead of an actual copy.  after all, this file isnt supposed to change, right?
-        copy_file('ln', $source_file_path, $build_file_path);
+        #copy_file('ln', $source_file_path, $build_file_path);
+
+        # hmm, maybe not... git doesn't play nice with hard links
+        copy_file($source_file_path, $build_file_path);
     }
 
     # non-static:
