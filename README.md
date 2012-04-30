@@ -11,12 +11,14 @@ First, look at the first few lines of build and make sure your Perl path is corr
 usage
 =====
 
+<pre>
 build
     -l (--list)             list all possible targets and exit
     -v (--verbose)          be more verbose (can be used multiple times eg: '-vvv')
     -f (--yaml --config)    specify a yaml file to use (instead of the default 'build.yaml')
     -b (--build-only)       build step only
     -d (--deploy-only)      deploy step only
+</pre>
 
 YAML config example
 =====
