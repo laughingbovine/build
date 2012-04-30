@@ -1,5 +1,7 @@
 # learn YAML real quick: https://www.google.com/search?q=yaml+tutorial
 
+# all relative paths will be relative to this config file's directory
+
 # build_basedir
 # directory where all builds ("stage" step) will be based (subdirs created for each target)
 build_basedir: .build/
