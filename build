@@ -18,26 +18,32 @@ use Filter;
 
 my $VERBOSE = 0;
 
+my %hook_verbosity = (verbose => 0);
+
 # "external" util functions
 ################################################################################
 
 sub shell
 {
-    my ($verbose, $command) = @_;
+    my ($command, %options) = @_;
 
     return unless $command;
 
-    if ($verbose)
+    if ($options{verbose})
     {
         my $prefixed_command = $command;
         $prefixed_command =~ s/^/!!!:/gm;
         $prefixed_command =~ s/\s*$/\n/;
         print $prefixed_command;
 
-        my @output = `$command 2>&1`;
+        my @output = `($command) 2>&1`;
         chomp(@output);
 
         printf("---:%s\n", $_) foreach @output;
+    }
+    elsif ($options{quiet})
+    {
+        system("($command) > /dev/null 2>&1");
     }
     else
     {
@@ -45,62 +51,156 @@ sub shell
         system($command);
     }
 
-    if ($? == -1)
+    if ($options{failure_ok})
     {
-        die sprintf("running '%s': failed to execute: %s\n", $command, $!);
+        if ($options{verbose})
+        {
+            print "***: Failed, but that's ok.\n" if $? != 0;
+
+            if ($? == -1)
+            {
+                printf("***: failed to execute: %s\n", $!);
+            }
+            elsif ($? & 127)
+            {
+                printf("***: died with signal: %d, %s coredump\n", ($? & 127), ($? & 128) ? 'with' : 'without');
+            }
+            elsif ($? != 0)
+            {
+                printf("***: exited with value: %d\n", $? >> 8);
+            }
+        }
+
+        return $? == 0;
     }
-    elsif ($? & 127)
+    else
     {
-        die sprintf("running '%s': died with signal: %d, %s coredump\n", $command, ($? & 127), ($? & 128) ? 'with' : 'without');
+        if ($options{verbose})
+        {
+            if ($? == -1)
+            {
+                die sprintf("***: failed to execute: %s\n", $!);
+            }
+            elsif ($? & 127)
+            {
+                die sprintf("***: died with signal: %d, %s coredump\n", ($? & 127), ($? & 128) ? 'with' : 'without');
+            }
+            elsif ($? != 0)
+            {
+                die sprintf("***: exited with value: %d\n", $? >> 8);
+            }
+        }
+        else
+        {
+            if ($? == -1)
+            {
+                die sprintf("running '%s': failed to execute: %s\n", $command, $!);
+            }
+            elsif ($? & 127)
+            {
+                die sprintf("running '%s': died with signal: %d, %s coredump\n", $command, ($? & 127), ($? & 128) ? 'with' : 'without');
+            }
+            elsif ($? != 0)
+            {
+                die sprintf("running '%s': exited with value: %d\n", $command, $? >> 8);
+            }
+        }
+
+        return 1;
     }
-    elsif ($? != 0)
+}
+
+# takes a "deploy configuration" (everything under the 'deploy' tag typically in a target config) and turns it into a location string
+# (be it an ssh connect string or a directory or ...)
+# lots of options
+sub generate_destination_string
+{
+    my ($deploy_config, %options) = @_;
+
+    my $result;
+    my %info;
+
+    $info{remote} = 0;
+
+    if (ref($deploy_config))
     {
-        die sprintf("running '%s': exited with value: %d\n", $command, $? >> 8);
+        if ($deploy_config->{server})
+        {
+            $info{remote} = 1;
+
+            $result = $deploy_config->{server};
+
+            unless ($options{no_user})
+            {
+                $result = $deploy_config->{user}.'@'.$result if $deploy_config->{user};
+            }
+
+            unless ($options{no_dir})
+            {
+                $result = $result.':'.$deploy_config->{dir} if $deploy_config->{dir};
+            }
+
+            if ($options{schema})
+            {
+                $result = $options{schema}.'://'.$result;
+            }
+        }
+        elsif ($deploy_config->{dir})
+        {
+            $result = $deploy_config->{dir};
+        }
+
+        if ($options{assert_remote} and not $info{remote})
+        {
+            die "generate_destination_string(): deploy configuration expected to refer to a remote location (but it does not)";
+        }
+        elsif ($options{assert_local} and $info{remote})
+        {
+            die "generate_destination_string(): deploy configuration expected to refer to a local location (but it does not)";
+        }
+
+        if ($options{assert_dir} and not $deploy_config->{dir})
+        {
+            die "generate_destination_string(): deploy configuration expected to have a directory component (but it does not)";
+        }
     }
+    else
+    {
+        if ($options{assert_deploy_config})
+        {
+            die "generate_destination_string(): arg is not a deploy configuration";
+        }
+        else
+        {
+            # regular strings just pass through (without the assert option)
+            # hopefully will be a local directory path (otherwise things can get hairy)
+            $result = $deploy_config;
+        }
+    }
+
+    return wantarray ? (\%info, $result) : $result;
 }
 
 sub run_commands_in_
 {
-    my ($verbose, $destination, @commands) = @_;
+    my ($command, $deploy_config, %options) = @_;
 
-    #print Dumper(\@_);
+    my ($dest_info, $dest_string) = generate_destination_string($deploy_config, no_dir => 1, assert_dir => 1);
 
-    # either the destination is local or remote
-    if (not ref($destination))
+    if ($dest_info->{remote})
     {
-        # local
-        my $dir = $destination;
-
-        foreach my $command (@commands)
-        {
-            shell($verbose, "(cd $dir; $command)");
-        }
-    }
-    elsif (ref($destination) eq 'HASH' and $destination->{dir} and not (defined($destination->{server}) and $destination->{server}))
-    {
-        # local
-        my $dir = $destination->{dir};
-
-        foreach my $command (@commands)
-        {
-            shell($verbose, "(cd $dir; $command)");
-        }
-    }
-    elsif (ref($destination) eq 'HASH' and defined($destination->{server}) and $destination->{server})
-    {
-        # remote
-        my $connect = $destination->{server};
-        $connect = $destination->{user}.'@'.$connect if $destination->{user};
-
-        my $pre_command = "ssh -T $connect <<'ENDSSH'\n";
-        $pre_command .= "cd $destination->{dir}\n" if $destination->{dir};
+        # location is remote
+        my $pre_command = "ssh -T $dest_string <<'ENDSSH'\n";
+        $pre_command .= "cd $deploy_config->{dir}\n";
 
         my $post_command = "\nENDSSH\n";
 
-        foreach my $command (@commands)
-        {
-            shell($verbose, $pre_command.$command.$post_command);
-        }
+        shell($pre_command.$command.$post_command, %options);
+    }
+    else
+    {
+        # location is local, so location string will be a directory
+        shell("cd $dest_string; $command", %options);
     }
 }
 
@@ -157,13 +257,13 @@ sub prepare_copy
     push @commands, qq[chmod $mode '$dst_dir';];
     push @commands, qq[chown $uname:$gname '$dst_dir';];
 
-    shell($VERBOSE > 2, join("\n", @commands));
+    shell(join("\n", @commands), verbose => $VERBOSE > 2);
 }
 
 sub copy_file
 {
     my ($src, $dst);
-    my $copy_command = 'cp -p';
+    my $copy_command = 'cp -pR'; # -p to preserve permissions, -R to preserve symlinks
 
     if (@_ == 3)
     {
@@ -174,7 +274,7 @@ sub copy_file
         ($src, $dst) = @_;
     }
 
-    die "copy_file(): source path '$src' is not a file" unless -f $src;
+    die "copy_file(): source path '$src' is not a file" unless -f $src or -l $src;
 
     my $src_dir = dirname($src);
     my $dst_dir = dirname($dst);
@@ -197,31 +297,103 @@ sub copy_file
     push @commands,
         qq[$copy_command '$src' '$dst';];
 
-    shell($VERBOSE > 2, join("\n", @commands));
+    shell(join("\n", @commands), verbose => $VERBOSE > 2);
 }
 
 sub git_archive
 {
     my ($work_dir, $repo_dir, $label) = @_;
 
-    return unless $work_dir and $repo_dir;
+    die "git_archive(): invalid arguments ($work_dir, $repo_dir, ...)" unless $work_dir and $repo_dir;
 
-    $label ||= 'auto-commit';
-
-    my @commands;
-
+    my %verbosity;
     if ($VERBOSE > 2)
     {
-        push @commands, qq[git init --bare '$repo_dir'] unless -d $repo_dir;
-        push @commands, qq[git --work-tree '$work_dir' --git-dir '$repo_dir' add -Av . && git --work-tree '$work_dir' --git-dir '$repo_dir' commit -v --allow-empty -m "$label -- `date`"];
+        $verbosity{verbose} = 1;
     }
     else
     {
-        push @commands, qq[git init -q --bare '$repo_dir'] unless -d $repo_dir;
-        push @commands, qq[git --work-tree '$work_dir' --git-dir '$repo_dir' add -A . && git --work-tree '$work_dir' --git-dir '$repo_dir' commit -q --allow-empty -m "$label -- `date`"];
+        $verbosity{quiet} = 1;
     }
 
-    shell($VERBOSE > 2, join("\n", @commands));
+    my $git = qq[git --work-tree '$work_dir' --git-dir '$repo_dir'];
+
+    $label ||= 'auto-commit';
+
+    shell(qq[git init --bare '$repo_dir'], %verbosity) unless -d $repo_dir;
+    shell(qq[$git add -A . && $git commit --allow-empty -m "$label -- `date`"], %verbosity);
+}
+
+sub rsync_push
+{
+    my ($source_dir, $deploy_config) = @_;
+
+    my %verbosity;
+    if ($VERBOSE > 1)
+    {
+        $verbosity{verbose} = 1;
+    }
+    else
+    {
+        $verbosity{quiet} = 1;
+    }
+
+    my $dest_string = generate_destination_string($deploy_config, assert_dir => 1);
+
+    shell("rsync -rcCvl $source_dir $dest_string", %verbosity);
+}
+
+sub git_push
+{
+    my ($work_dir, $repo_dir, $branch_name, $deploy_config) = @_;
+
+    die "git_push(): invalid arguments ($work_dir, $repo_dir, ...)" unless $work_dir and $repo_dir;
+
+    # git is loud.  using '-q' on all commands will still produce output.  need to force git to be silent if requested
+    my %verbosity;
+    if ($VERBOSE > 1)
+    {
+        $verbosity{verbose} = 1;
+    }
+    else
+    {
+        $verbosity{quiet} = 1;
+    }
+
+    my $local_git = qq[git --work-tree '$work_dir' --git-dir '$repo_dir'];
+
+    my $git_destination = generate_destination_string($deploy_config, assert_dir => 1);
+
+    # in order to do a git push we need to do the following:
+    # 1) already have a git repo.  for this we will use the archive repo.  assume this already exists and is up-to-date
+    #    additional information about this repo: everything is kept in the "master" (default) branch
+
+    # 2)  create a branch to push if one doesnt already exist
+    # 2b) if one does, make sure said branch is up to date
+    unless (shell(qq[$local_git branch '$branch_name'], %verbosity, failure_ok => 1))
+    {
+        # failure means branch already exists. switch to branch, merge master, switch back to master
+        shell(qq[$local_git checkout '$branch_name' && $local_git merge --ff-only master && $local_git checkout master], %verbosity);
+    }
+
+    # 3)  make sure destination is set up as a git repo
+    # 3b) make sure destination is NOT currently on the branch about to be pushed (or else get a "remote rejected, branch is currently checked out" error)
+    if (shell(qq[git ls-remote $git_destination], %verbosity, failure_ok => 1))
+    {
+        # git repository exists, make sure we're on the right branch
+        run_commands_in_(qq[git checkout master || git checkout -b master], $deploy_config, %verbosity);
+    }
+    else
+    {
+        # no git repository exists on remote side. lets create it
+        run_commands_in_(qq[git init], $deploy_config, %verbosity);
+    }
+
+    # 4) do the push
+    shell(qq[$local_git push $git_destination '$branch_name'], %verbosity);
+
+    # 5) switch the destination repo to the just-pushed branch
+    run_commands_in_(qq[git checkout '$branch_name'], $deploy_config, %verbosity);
 }
 
 # "internal" util functions
@@ -542,14 +714,15 @@ sub get_target_config
         $target->{'additional-files'},
         $target->{'files'},
     );
-    $ss{static_files} = flatten_a(
-        $config->{'static_files'},
-        $config->{'static-files'},
-        $target->{'additional_static_files'},
-        $target->{'additional-static-files'},
-        $target->{'static_files'},
-        $target->{'static-files'},
-    );
+    # removing support for static files
+    #$ss{static_files} = flatten_a(
+    #    $config->{'static_files'},
+    #    $config->{'static-files'},
+    #    $target->{'additional_static_files'},
+    #    $target->{'additional-static-files'},
+    #    $target->{'static_files'},
+    #    $target->{'static-files'},
+    #);
 
     # get our filters and evals
     # TODO: filters shouldnt have to be [{s=>blah, r=>blah}, ...], but maybe (blah=>blah, ...)
@@ -568,6 +741,16 @@ sub get_target_config
     );
 
     # get commands for our "hooks"
+    $ss{hook_src} = flatten_a(
+        $config->{'src'},
+        $config->{'before'},
+        $config->{'before_build'},
+        $config->{'before-build'},
+        $target->{'src'},
+        $target->{'before'},
+        $target->{'before_build'},
+        $target->{'before-build'},
+    );
     $ss{hook_before_filter} = flatten_a(
         $config->{'before_filter'},
         $config->{'before-filter'},
@@ -715,7 +898,14 @@ sub traverse_also
     return \@result;
 }
 
-# and... action!
+=sub build_target
+these are the steps taken:
+1) copy files (static and otherwise) into staging area (preserve permissions)
+2) hook (ran in staging area)
+3) search/replace + eval
+4) hook (ran in staging area)
+5) archive (using git)
+=cut
 sub build_target
 {
     my ($config, $target_name) = @_;
@@ -728,17 +918,22 @@ sub build_target
     my $build_dir       = $target->{TEMP}{build_dir};
     my $git_dir         = $target->{TEMP}{git_dir};
     my $files           = $target->{TEMP}{files};
-    my $static_files    = $target->{TEMP}{static_files};
+    #my $static_files    = $target->{TEMP}{static_files};
     my $filters         = $target->{TEMP}{filters};
     my $evals           = $target->{TEMP}{evals};
 
+    my $hook_src            = $target->{TEMP}{hook_src};
     my $hook_before_filter  = $target->{TEMP}{hook_before_filter};
     my $hook_after_filter   = $target->{TEMP}{hook_after_filter};
 
-    my $file_count = @$static_files + @$files;
+    #my $file_count = scalar(@$static_files) + scalar(@$files);
+    my $file_count = scalar(@$files);
+
+    my $doing_src_hook  = @$hook_src;
+    my $doing_build     = ($source_dir and $build_dir and $file_count > 0) ? 1 : 0;
 
     # before anything, make sure we're configured enough to actually do stuff
-    unless ($source_dir and $build_dir and $file_count > 0)
+    unless ($doing_src_hook or $doing_build)
     {
         print "using        $config_path\n";
         print "target       $target_name\n";
@@ -750,127 +945,153 @@ sub build_target
     print "using            $config_path\n";
     print "target           $target_name\n";
     print "source dir       $source_dir\n";
-    print "building to      $build_dir\n";
 
-    # copy to build (staging) area
-    #------------------------------------------------------------------------------#
-    # make sure a clear build dir exists
-    prepare_copy($source_dir, $build_dir);
-
-    # prepare file lists - use hashes since file mappings can be overwritten
-    my %static_files;
-    my %files;
-
-    foreach my $source (@$static_files)
+    if ($doing_src_hook)
     {
-        my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
-
-        $static_files{$source_file_name} = $build_file_name;
-    }
-
-    foreach my $source (@$files)
-    {
-        my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
-
-        $files{$source_file_name} = $build_file_name;
-    }
-
-    # copy source dir files into build dir preserving directory structure and file attributes
-    # static:
-    foreach my $source_file_name (keys %static_files)
-    {
-        my $build_file_name = $static_files{$source_file_name};
-
-        my $source_file_path    = $source_dir.$source_file_name;
-        my $build_file_path     = $build_dir.$build_file_name;
-
-        # let's do a hard link instead of an actual copy.  after all, this file isnt supposed to change, right?
-        #copy_file('ln', $source_file_path, $build_file_path);
-
-        # hmm, maybe not... git doesn't play nice with hard links
-        copy_file($source_file_path, $build_file_path);
-    }
-
-    # non-static:
-    foreach my $source_file_name (keys %files)
-    {
-        my $build_file_name = $files{$source_file_name};
-
-        my $source_file_path    = $source_dir.$source_file_name;
-        my $build_file_path     = $build_dir.$build_file_name;
-
-        copy_file($source_file_path, $build_file_path);
-    }
-
-    # hooks - before build
-    #------------------------------------------------------------------------------#
-    if (@$hook_before_filter)
-    {
-        run_commands_in_($VERBOSE > 0, $build_dir, @$hook_before_filter);
-    }
-
-    # filter - search/replace
-    #------------------------------------------------------------------------------#
-    # filter all files through all filters
-    if (@$filters)
-    {
-        # merge filters (in order, of course)
-        my %target_filter_config;
-        foreach my $filter_config (@$filters)
+        # hooks - before anything, on source dir
+        #------------------------------------------------------------------------------#
+        if (@$hook_src)
         {
-            $target_filter_config{$filter_config->{s}} = $filter_config->{r};
-        }
-
-        # generate master filter
-        my @filter_subs;
-
-        foreach my $search (keys %target_filter_config)
-        {
-            my $replace = $target_filter_config{$search};
-
-            # be sure to disable all perl regex metacharacters (with '\Q' and '\E')
-            push @filter_subs, sub { ${$_[0]} =~ s/\Q$search\E/$replace/g };
-        }
-
-        my $master_filter = Filter::generate_filter_group(@filter_subs);
-
-        # run master filter on each file
-        foreach my $build_file_name (values %files)
-        {
-            my $build_file_path = $build_dir.$build_file_name;
-
-            Filter::filter_file($build_file_path, $master_filter);
+            run_commands_in_($_, $source_dir, %hook_verbosity) foreach @$hook_src;
         }
     }
 
-    # filter - eval
-    #------------------------------------------------------------------------------#
-    # run all files through the eval "filter"
-    if (%$evals)
+    # check if we're actually doing a "build" (stage/filter)
+    if ($doing_build)
     {
-        # run eval on each file
-        foreach my $build_file_name (values %files)
+        print "building to      $build_dir\n";
+
+        # copy to build (staging) area
+        #------------------------------------------------------------------------------#
+        # make sure a clear build dir exists
+        prepare_copy($source_dir, $build_dir);
+
+        # prepare file lists - use hashes since file mappings can be overwritten
+        #my %static_files;
+        my %files;
+
+        #foreach my $source (@$static_files)
+        #{
+        #    my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
+
+        #    $static_files{$source_file_name} = $build_file_name;
+        #}
+
+        foreach my $source (@$files)
         {
-            my $build_file_path = $build_dir.$build_file_name;
+            my ($source_file_name, $build_file_name) = single_hashref_or_scalar($source);
 
-            Filter::filter_file_eval($build_file_path, $evals);
+            $files{$source_file_name} = $build_file_name;
         }
-    }
 
-    # hooks - after build
-    #------------------------------------------------------------------------------#
-    if (@$hook_after_filter)
+        # copy source dir files into build dir preserving directory structure and file attributes
+        # static:
+        #foreach my $source_file_name (keys %static_files)
+        #{
+        #    my $build_file_name = $static_files{$source_file_name};
+
+        #    my $source_file_path    = $source_dir.$source_file_name;
+        #    my $build_file_path     = $build_dir.$build_file_name;
+
+        #    # let's do a hard link instead of an actual copy.  after all, this file isnt supposed to change, right?
+        #    #copy_file('ln', $source_file_path, $build_file_path);
+
+        #    # hmm, maybe not... git doesn't play nice with hard links
+        #    copy_file($source_file_path, $build_file_path);
+        #}
+
+        # non-static:
+        foreach my $source_file_name (keys %files)
+        {
+            my $build_file_name = $files{$source_file_name};
+
+            my $source_file_path    = $source_dir.$source_file_name;
+            my $build_file_path     = $build_dir.$build_file_name;
+
+            copy_file($source_file_path, $build_file_path);
+        }
+
+        # hooks - before build
+        #------------------------------------------------------------------------------#
+        if (@$hook_before_filter)
+        {
+            run_commands_in_($_, $build_dir, %hook_verbosity) foreach @$hook_before_filter;
+        }
+
+        # filter - search/replace
+        #------------------------------------------------------------------------------#
+        # filter all files through all filters
+        if (@$filters)
+        {
+            # merge filters (in order, of course)
+            my %target_filter_config;
+            foreach my $filter_config (@$filters)
+            {
+                $target_filter_config{$filter_config->{s}} = $filter_config->{r};
+            }
+
+            # generate master filter
+            my @filter_subs;
+
+            foreach my $search (keys %target_filter_config)
+            {
+                my $replace = $target_filter_config{$search};
+
+                # be sure to disable all perl regex metacharacters (with '\Q' and '\E')
+                push @filter_subs, sub { ${$_[0]} =~ s/\Q$search\E/$replace/g };
+            }
+
+            my $master_filter = Filter::generate_filter_group(@filter_subs);
+
+            # run master filter on each file
+            foreach my $build_file_name (values %files)
+            {
+                my $build_file_path = $build_dir.$build_file_name;
+
+                Filter::filter_file($build_file_path, $master_filter);
+            }
+        }
+
+        # filter - eval
+        #------------------------------------------------------------------------------#
+        # run all files through the eval "filter"
+        if (%$evals)
+        {
+            # run eval on each file
+            foreach my $build_file_name (values %files)
+            {
+                my $build_file_path = $build_dir.$build_file_name;
+
+                Filter::filter_file_eval($build_file_path, $evals);
+            }
+        }
+
+        # hooks - after build
+        #------------------------------------------------------------------------------#
+        if (@$hook_after_filter)
+        {
+            run_commands_in_($_, $build_dir, %hook_verbosity) foreach @$hook_after_filter;
+        }
+
+        # archive
+        #------------------------------------------------------------------------------#
+        git_archive($build_dir, $git_dir, 'build') if $git_dir;
+    }
+    else
     {
-        run_commands_in_($VERBOSE > 0, $build_dir, @$hook_after_filter);
+        print "nothing to build\n";
     }
-
-    # archive
-    #------------------------------------------------------------------------------#
-    git_archive($build_dir, $git_dir, 'build');
 
     return 1;
 }
 
+=sub deploy_target
+steps taken:
+1) hook (ran in deploy destination)
+2) archive (using git)
+3) copy files to destination
+4) hook (ran in deploy destination)
+=cut
 sub deploy_target
 {
     my ($config, $target_name) = @_;
@@ -894,47 +1115,41 @@ sub deploy_target
     {
         if (@{$deploy_config->{hook_before_deploy}})
         {
-            run_commands_in_($VERBOSE > 0, $deploy_config, @{$deploy_config->{hook_before_deploy}});
+            run_commands_in_($_, $deploy_config, %hook_verbosity) foreach @{$deploy_config->{hook_before_deploy}};
         }
     }
+
+    # archive
+    #------------------------------------------------------------------------------#
+    git_archive($build_dir, $git_dir, 'deploy') if $git_dir;
 
     # deploy
     #------------------------------------------------------------------------------#
     foreach my $deploy_config (@$deploy_configs)
     {
-        # come up with destination string
-        my $destination = $deploy_config->{dir} || '';
-
-        if ($deploy_config->{server})
+        if ($deploy_config->{method} and $deploy_config->{method} eq 'git')
         {
-            $destination = $deploy_config->{server}.':'.$destination;
+            print "deploying to     ".generate_destination_string($deploy_config)."\n";
 
-            if ($deploy_config->{user})
-            {
-                $destination = $deploy_config->{user}.'@'.$destination;
-            }
+            git_push($build_dir, $git_dir, $deploy_config->{name} ? $deploy_config->{name} : 'deploy', $deploy_config);
         }
+        else
+        {
+            print "deploying to     ".generate_destination_string($deploy_config)."\n";
 
-        # info
-        print "deploying to     $destination\n";
-
-        # rsync
-        shell($VERBOSE > 1, "rsync ".($VERBOSE > 1 ? '-rcCv' : '-rcCq')." $build_dir $destination");
+            rsync_push($build_dir, $deploy_config);
+        }
     }
 
     # hooks - after deploy
     #------------------------------------------------------------------------------#
     foreach my $deploy_config (@$deploy_configs)
     {
-        if (@{$deploy_config->{hook_before_deploy}})
+        if (@{$deploy_config->{hook_after_deploy}})
         {
-            run_commands_in_($VERBOSE > 0, $deploy_config, @{$deploy_config->{hook_before_deploy}});
+            run_commands_in_($_, $deploy_config, %hook_verbosity) foreach @{$deploy_config->{hook_after_deploy}};
         }
     }
-
-    # archive
-    #------------------------------------------------------------------------------#
-    git_archive($build_dir, $git_dir, 'deploy');
 
     return 1;
 }
@@ -961,6 +1176,8 @@ GetOptions(
     'd|deploy-only'     => \$opt_deploy_only,
 #   'r|recurse'         => \$opt_recurse,
 );
+
+$hook_verbosity{verbose} = $VERBOSE > 0;
 
 # handle '-l' option (list all targets)
 ################################################################################
